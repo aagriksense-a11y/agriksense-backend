@@ -1,0 +1,898 @@
+// AgriKSense backend data model.
+// Conventions: internal UUID primary keys; public, immutable, zero-padded 10-digit
+// `agriksenseId` on every user; money as integer kobo; sensitive identity/bank
+// numbers stored AES-256-GCM encrypted plus a keyed hash for duplicate lookups.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum BaseRole {
+  farmer
+  dco
+  organization_admin
+  platform_admin
+}
+
+enum AuthProvider {
+  local
+  google
+}
+
+enum OnboardingStatus {
+  draft
+  pending_verification
+  complete
+}
+
+enum VerificationStatus {
+  not_submitted
+  pending
+  verified
+  rejected
+  manual_review
+}
+
+enum VerificationType {
+  nin
+  cac
+}
+
+enum ConsentScope {
+  account_creation
+  farm_data_collection
+}
+
+enum ConsentDecision {
+  accepted
+  rejected
+}
+
+enum DocumentType {
+  nin
+  cac_certificate
+  cac_form2
+  cac_form7
+  utility_bill
+  passport_photo
+  observation_evidence
+  crop_image
+  other
+}
+
+enum MembershipStatus {
+  not_verified
+  pending
+  verified
+  rejected
+}
+
+enum ImportEntityType {
+  farmer
+  dco
+  organization
+  member
+}
+
+enum ImportJobStatus {
+  validated
+  failed
+  committing
+  committed
+}
+
+enum ImportRowStatus {
+  valid
+  invalid
+  duplicate
+  committed
+  failed
+}
+
+enum VisitRequestMode {
+  known_farms
+  geographic_preference
+}
+
+enum VisitRequestStatus {
+  pending_assignment
+  partially_assigned
+  assigned
+  rejected
+  cancelled
+}
+
+enum AssignmentStatus {
+  assigned
+  accepted
+  in_progress
+  completed
+  cancelled
+}
+
+enum FarmVisitStatus {
+  in_progress
+  completed
+  ended_early
+}
+
+enum ObservationType {
+  disease
+  pest
+}
+
+enum Severity {
+  low
+  medium
+  high
+  critical
+}
+
+enum AreaUnit {
+  hectare
+  acre
+  square_meter
+}
+
+enum AiCrop {
+  rice
+  maize
+  tomato
+}
+
+enum AiModelStatus {
+  registered
+  approved
+  active
+  retired
+}
+
+enum AiPredictionStatus {
+  succeeded
+  failed
+}
+
+enum GroupMemberType {
+  farmer
+  dco
+  organization
+}
+
+enum NotificationChannel {
+  in_app
+  sms
+  whatsapp
+  email
+}
+
+enum DeliveryStatus {
+  queued
+  sent
+  delivered
+  failed
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+/// Every 10-digit ID ever issued. Never deleted, so IDs are never recycled.
+model IssuedAgriksenseId {
+  id       String   @id @db.Char(10)
+  issuedAt DateTime @default(now())
+}
+
+model User {
+  id               String             @id @default(uuid()) @db.Uuid
+  agriksenseId     String             @unique @db.Char(10)
+  baseRole         BaseRole
+  email            String?            @unique
+  phone            String?            @unique
+  passwordHash     String?
+  authProvider     AuthProvider       @default(local)
+  googleSubject    String?            @unique
+  isActive         Boolean            @default(true)
+  onboardingStatus OnboardingStatus   @default(draft)
+  ninStatus        VerificationStatus @default(not_submitted)
+
+  // Individual profile fields (farmer / DCO / admin). Organization data lives on Organization.
+  firstName       String?
+  lastName        String?
+  otherName       String?
+  altPhone        String?
+  dateOfBirth     DateTime? @db.Date
+  gender          String?
+  address         String?
+  city            String?
+  stateId         Int?
+  lgaId           Int?
+  photoDocumentId String?   @db.Uuid
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdById String?   @db.Uuid
+
+  state            State?                   @relation(fields: [stateId], references: [id])
+  lga              Lga?                     @relation(fields: [lgaId], references: [id])
+  farmerProfile    FarmerProfile?
+  dcoProfile       DcoProfile?
+  organization     Organization?
+  refreshTokens    RefreshToken[]
+  passwordResets   PasswordResetToken[]
+  consents         Consent[]                @relation("ConsentSubject")
+  verifications    IdentityVerification[]
+  documents        Document[]
+  bankAccounts     BankAccount[]
+  memberships      OrganizationMembership[]
+  farms            Farm[]                   @relation("FarmOwner")
+  visitRequests    VisitRequest[]
+  dcoAssignments   FarmAssignment[]         @relation("AssignmentDco")
+  roleAssignments  UserRoleAssignment[]
+  groupMemberships GroupMember[]
+  notifications    Notification[]
+  predictions      AiPrediction[]
+
+  @@index([baseRole])
+  @@index([stateId, lgaId])
+}
+
+model FarmerProfile {
+  userId       String   @id @db.Uuid
+  managerName  String?
+  managerPhone String?
+  managerEmail String?
+  farmingGroup String? // optional free-text cooperative/group the farmer belongs to (not an admin Group)
+  primaryCrops String[]
+  yearsFarming Int?
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DcoProfile {
+  userId         String   @id @db.Uuid
+  availability   Json? // e.g. {"days":["mon","wed"],"notes":"mornings"}
+  hasTransport   Boolean?
+  educationLevel String?
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique
+  familyId   String    @db.Uuid
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?   @db.Uuid
+  createdAt  DateTime  @default(now())
+  userAgent  String?
+  ip         String?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+}
+
+model PasswordResetToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  initiatedBy String?   @db.Uuid // admin who initiated, if any
+  createdAt   DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ───────────────────────────── Consent ─────────────────────────────
+
+model ConsentDocument {
+  id          String       @id @default(uuid()) @db.Uuid
+  version     String
+  scope       ConsentScope
+  title       String
+  body        String
+  language    String       @default("en")
+  isCurrent   Boolean      @default(false)
+  publishedAt DateTime     @default(now())
+
+  @@unique([version, scope, language])
+}
+
+model Consent {
+  id             String          @id @default(uuid()) @db.Uuid
+  userId         String          @db.Uuid
+  version        String
+  scope          ConsentScope
+  decision       ConsentDecision
+  actorId        String          @db.Uuid // who recorded it (the farmer, or a DCO/admin on their behalf)
+  channel        String?
+  decidedAt      DateTime        @default(now())
+  withdrawnAt    DateTime?
+  withdrawnById  String?         @db.Uuid
+  withdrawReason String?
+  user           User            @relation("ConsentSubject", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, scope])
+}
+
+// ───────────────────────────── Verification & documents ─────────────────────────────
+
+model IdentityVerification {
+  id              String             @id @default(uuid()) @db.Uuid
+  type            VerificationType
+  userId          String             @db.Uuid
+  organizationId  String?            @db.Uuid
+  status          VerificationStatus @default(pending)
+  numberEncrypted String
+  numberHash      String
+  numberLast4     String
+  nameSubmitted   String?
+  nameMatch       String? // match | partial | mismatch | unknown
+  provider        String
+  providerRef     String?
+  failureReason   String?
+  documentIds     String[]
+  reviewedById    String?            @db.Uuid
+  reviewedAt      DateTime?
+  reviewNotes     String?
+  submittedAt     DateTime           @default(now())
+  completedAt     DateTime?
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization    Organization?      @relation(fields: [organizationId], references: [id])
+
+  @@index([userId, type])
+  @@index([numberHash])
+}
+
+model Document {
+  id             String       @id @default(uuid()) @db.Uuid
+  ownerId        String       @db.Uuid
+  organizationId String?      @db.Uuid
+  type           DocumentType
+  storageKey     String       @unique
+  originalName   String?
+  mimeType       String
+  sizeBytes      Int
+  sha256         String
+  createdAt      DateTime     @default(now())
+  deletedAt      DateTime?
+  owner          User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+}
+
+// ───────────────────────────── Locations ─────────────────────────────
+
+model State {
+  id            Int            @id @default(autoincrement())
+  name          String         @unique
+  code          String         @unique
+  lgas          Lga[]
+  users         User[]
+  farms         Farm[]
+  fareRates     FareRate[]
+  organizations Organization[]
+}
+
+model Lga {
+  id            Int            @id @default(autoincrement())
+  stateId       Int
+  name          String
+  state         State          @relation(fields: [stateId], references: [id])
+  cities        City[]
+  users         User[]
+  farms         Farm[]
+  organizations Organization[]
+
+  @@unique([stateId, name])
+}
+
+model City {
+  id    Int    @id @default(autoincrement())
+  lgaId Int
+  name  String
+  lga   Lga    @relation(fields: [lgaId], references: [id])
+
+  @@unique([lgaId, name])
+}
+
+// ───────────────────────────── Banking ─────────────────────────────
+
+model Bank {
+  id       Int           @id @default(autoincrement())
+  name     String        @unique
+  code     String        @unique
+  isActive Boolean       @default(true)
+  accounts BankAccount[]
+}
+
+model BankAccount {
+  id                     String    @id @default(uuid()) @db.Uuid
+  userId                 String    @db.Uuid
+  bankId                 Int
+  accountName            String
+  accountNumberEncrypted String
+  accountNumberHash      String
+  accountNumberLast4     String
+  isPrimary              Boolean   @default(false)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  deletedAt              DateTime?
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bank                   Bank      @relation(fields: [bankId], references: [id])
+
+  @@index([userId])
+}
+
+// ───────────────────────────── Organizations ─────────────────────────────
+
+model Organization {
+  id                  String                   @id @default(uuid()) @db.Uuid
+  ownerUserId         String                   @unique @db.Uuid
+  name                String
+  isRegistered        Boolean                  @default(false)
+  cacStatus           VerificationStatus       @default(not_submitted)
+  headquartersAddress String?
+  city                String?
+  stateId             Int?
+  lgaId               Int?
+  description         String?
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  owner               User                     @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  state               State?                   @relation(fields: [stateId], references: [id])
+  lga                 Lga?                     @relation(fields: [lgaId], references: [id])
+  contacts            OrganizationContact[]
+  memberships         OrganizationMembership[]
+  verifications       IdentityVerification[]
+}
+
+model OrganizationContact {
+  id                    String       @id @default(uuid()) @db.Uuid
+  organizationId        String       @db.Uuid
+  contactType           String // director | contact_person
+  fullName              String
+  phone                 String?
+  email                 String?
+  address               String?
+  position              String?
+  ninEncrypted          String?
+  ninLast4              String?
+  ninDocumentId         String?      @db.Uuid
+  utilityBillDocumentId String?      @db.Uuid
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+model OrganizationMembership {
+  id                String           @id @default(uuid()) @db.Uuid
+  organizationId    String           @db.Uuid
+  farmerId          String?          @db.Uuid
+  membershipNumber  String
+  isGeneratedNumber Boolean          @default(false)
+  memberName        String?
+  memberPhone       String?
+  status            MembershipStatus @default(not_verified)
+  statusReason      String?
+  verifiedAt        DateTime?
+  verifiedById      String?          @db.Uuid
+  joinedAt          DateTime?        @db.Date
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  farmer            User?            @relation(fields: [farmerId], references: [id])
+
+  @@unique([organizationId, membershipNumber])
+  @@unique([organizationId, farmerId])
+}
+
+// ───────────────────────────── Bulk import ─────────────────────────────
+
+model ImportJob {
+  id             String           @id @default(uuid()) @db.Uuid
+  entityType     ImportEntityType
+  status         ImportJobStatus
+  organizationId String?          @db.Uuid
+  createdById    String           @db.Uuid
+  fileName       String?
+  totalRows      Int              @default(0)
+  validRows      Int              @default(0)
+  invalidRows    Int              @default(0)
+  duplicateRows  Int              @default(0)
+  committedRows  Int              @default(0)
+  committedAt    DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  rows           ImportRow[]
+}
+
+model ImportRow {
+  id              String          @id @default(uuid()) @db.Uuid
+  jobId           String          @db.Uuid
+  rowNumber       Int
+  data            Json
+  status          ImportRowStatus
+  errors          Json?
+  createdEntityId String?
+  job             ImportJob       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, rowNumber])
+}
+
+model IdempotencyKey {
+  id           String   @id @default(uuid()) @db.Uuid
+  key          String
+  userId       String   @db.Uuid
+  method       String
+  path         String
+  requestHash  String
+  statusCode   Int?
+  responseBody Json?
+  createdAt    DateTime @default(now())
+
+  @@unique([userId, key])
+}
+
+// ───────────────────────────── Farms & visits ─────────────────────────────
+
+model Farm {
+  id           String                @id @default(uuid()) @db.Uuid
+  ownerId      String?               @db.Uuid
+  name         String
+  address      String
+  landmark     String?
+  village      String?
+  city         String
+  lgaId        Int
+  stateId      Int
+  latitude     Float?
+  longitude    Float?
+  isActive     Boolean               @default(true)
+  createdById  String                @db.Uuid
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  owner        User?                 @relation("FarmOwner", fields: [ownerId], references: [id])
+  lga          Lga                   @relation(fields: [lgaId], references: [id])
+  state        State                 @relation(fields: [stateId], references: [id])
+  assignments  FarmAssignment[]
+  visits       FarmVisit[]
+  crops        CropRecord[]
+  farmland     FarmlandMeasurement[]
+  observations Observation[]
+  predictions  AiPrediction[]
+
+  @@index([stateId, lgaId])
+  @@index([ownerId])
+}
+
+model VisitRequest {
+  id               String             @id @default(uuid()) @db.Uuid
+  dcoId            String             @db.Uuid
+  mode             VisitRequestMode
+  knownFarms       Json?
+  preferredStateId Int?
+  preferredLgaId   Int?
+  preferredCity    String?
+  maxFarms         Int?
+  availability     Json?
+  notes            String?
+  status           VisitRequestStatus @default(pending_assignment)
+  adminNotes       String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  dco              User               @relation(fields: [dcoId], references: [id])
+  assignments      FarmAssignment[]
+
+  @@index([status])
+}
+
+model FarmAssignment {
+  id                  String           @id @default(uuid()) @db.Uuid
+  farmId              String           @db.Uuid
+  dcoId               String           @db.Uuid
+  visitRequestId      String?          @db.Uuid
+  assignedById        String           @db.Uuid
+  status              AssignmentStatus @default(assigned)
+  scheduledFor        DateTime?
+  fareKobo            Int?
+  distanceValue       Float?
+  distanceUnit        String?
+  fareRateKoboPerUnit Int?
+  fareBasis           Json?
+  notes               String?
+  cancelReason        String?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  farm                Farm             @relation(fields: [farmId], references: [id])
+  dco                 User             @relation("AssignmentDco", fields: [dcoId], references: [id])
+  visitRequest        VisitRequest?    @relation(fields: [visitRequestId], references: [id])
+  visits              FarmVisit[]
+
+  @@index([dcoId, status])
+  @@index([farmId])
+}
+
+model FareRate {
+  id            String   @id @default(uuid()) @db.Uuid
+  stateId       Int
+  koboPerMile   Int
+  effectiveFrom DateTime @db.Date
+  setById       String   @db.Uuid
+  createdAt     DateTime @default(now())
+  state         State    @relation(fields: [stateId], references: [id])
+
+  @@unique([stateId, effectiveFrom])
+}
+
+model FarmVisit {
+  id            String          @id @default(uuid()) @db.Uuid
+  farmId        String          @db.Uuid
+  assignmentId  String?         @db.Uuid
+  dcoId         String          @db.Uuid
+  status        FarmVisitStatus @default(in_progress)
+  startedAt     DateTime        @default(now())
+  endedAt       DateTime?
+  notes         String?
+  endReason     String?
+  checkInLat    Float?
+  checkInLng    Float?
+  dataCollected Json?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  farm          Farm            @relation(fields: [farmId], references: [id])
+  assignment    FarmAssignment? @relation(fields: [assignmentId], references: [id])
+
+  @@index([farmId])
+}
+
+// ───────────────────────────── Crop records ─────────────────────────────
+
+model CropRecord {
+  id                  String        @id @default(uuid()) @db.Uuid
+  farmId              String        @db.Uuid
+  visitId             String?       @db.Uuid
+  cropType            String
+  variety             String?
+  season              String?
+  plantingDate        DateTime?     @db.Date
+  expectedHarvestDate DateTime?     @db.Date
+  areaPlanted         Float?
+  areaUnit            AreaUnit?
+  growthStage         String?
+  notes               String?
+  recordedById        String        @db.Uuid
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  farm                Farm          @relation(fields: [farmId], references: [id])
+  observations        Observation[]
+
+  @@index([farmId])
+  @@index([cropType])
+}
+
+model FarmlandMeasurement {
+  id                String   @id @default(uuid()) @db.Uuid
+  farmId            String   @db.Uuid
+  visitId           String?  @db.Uuid
+  area              Float
+  areaUnit          AreaUnit
+  areaHectares      Float
+  perimeterMeters   Float?
+  soilType          String?
+  terrain           String?
+  irrigation        String?
+  measurementMethod String?
+  boundary          Json? // GeoJSON polygon
+  recordedById      String   @db.Uuid
+  measuredAt        DateTime @default(now())
+  createdAt         DateTime @default(now())
+  farm              Farm     @relation(fields: [farmId], references: [id])
+
+  @@index([farmId])
+}
+
+model Observation {
+  id                  String          @id @default(uuid()) @db.Uuid
+  farmId              String          @db.Uuid
+  cropRecordId        String?         @db.Uuid
+  visitId             String?         @db.Uuid
+  predictionId        String?         @db.Uuid
+  type                ObservationType
+  name                String
+  cropType            String?
+  severity            Severity?
+  affectedAreaPercent Float?
+  description         String?
+  evidenceDocumentIds String[]
+  annotations         Json?
+  observedAt          DateTime        @default(now())
+  recordedById        String          @db.Uuid
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  farm                Farm            @relation(fields: [farmId], references: [id])
+  cropRecord          CropRecord?     @relation(fields: [cropRecordId], references: [id])
+
+  @@index([farmId])
+}
+
+// ───────────────────────────── AI ─────────────────────────────
+
+model AiModelVersion {
+  id            String              @id @default(uuid()) @db.Uuid
+  crop          AiCrop
+  version       String
+  serviceUrl    String
+  classes       String[] // ordered class names; index == class_id
+  status        AiModelStatus       @default(registered)
+  approvedById  String?             @db.Uuid
+  approvedAt    DateTime?
+  activatedAt   DateTime?
+  activatedById String?             @db.Uuid
+  createdAt     DateTime            @default(now())
+  evaluations   AiModelEvaluation[]
+  predictions   AiPrediction[]
+
+  @@unique([crop, version])
+}
+
+model AiModelEvaluation {
+  id             String         @id @default(uuid()) @db.Uuid
+  modelVersionId String         @db.Uuid
+  metrics        Json
+  evidenceUrl    String?
+  notes          String?
+  signedOffById  String         @db.Uuid
+  createdAt      DateTime       @default(now())
+  modelVersion   AiModelVersion @relation(fields: [modelVersionId], references: [id])
+}
+
+model AiPrediction {
+  id              String             @id @default(uuid()) @db.Uuid
+  userId          String             @db.Uuid
+  farmId          String?            @db.Uuid
+  crop            AiCrop
+  modelVersionId  String             @db.Uuid
+  imageDocumentId String?            @db.Uuid
+  status          AiPredictionStatus
+  detections      Json
+  imageWidth      Int?
+  imageHeight     Int?
+  latencyMs       Int?
+  errorMessage    String?
+  createdAt       DateTime           @default(now())
+  user            User               @relation(fields: [userId], references: [id])
+  farm            Farm?              @relation(fields: [farmId], references: [id])
+  modelVersion    AiModelVersion     @relation(fields: [modelVersionId], references: [id])
+  feedback        AiFeedback[]
+
+  @@index([userId])
+  @@index([farmId])
+}
+
+model AiFeedback {
+  id                 String       @id @default(uuid()) @db.Uuid
+  predictionId       String       @db.Uuid
+  userId             String       @db.Uuid
+  isCorrect          Boolean
+  correctedClassName String?
+  detectionIndex     Int?
+  notes              String?
+  isVerified         Boolean      @default(false)
+  createdAt          DateTime     @default(now())
+  prediction         AiPrediction @relation(fields: [predictionId], references: [id], onDelete: Cascade)
+}
+
+// ───────────────────────────── RBAC & groups ─────────────────────────────
+
+model Role {
+  id          String               @id @default(uuid()) @db.Uuid
+  key         String               @unique
+  name        String
+  description String?
+  isSystem    Boolean              @default(false)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  permissions RolePermission[]
+  assignments UserRoleAssignment[]
+}
+
+model Permission {
+  key         String           @id
+  description String
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId        String     @db.Uuid
+  permissionKey String
+  role          Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission    Permission @relation(fields: [permissionKey], references: [key], onDelete: Cascade)
+
+  @@id([roleId, permissionKey])
+}
+
+model UserRoleAssignment {
+  userId       String   @db.Uuid
+  roleId       String   @db.Uuid
+  assignedById String   @db.Uuid
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role         Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model Group {
+  id          String          @id @default(uuid()) @db.Uuid
+  name        String          @unique
+  description String?
+  memberType  GroupMemberType
+  createdById String          @db.Uuid
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  members     GroupMember[]
+}
+
+model GroupMember {
+  groupId   String   @db.Uuid
+  userId    String   @db.Uuid
+  addedById String   @db.Uuid
+  createdAt DateTime @default(now())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+}
+
+// ───────────────────────────── Notifications & audit ─────────────────────────────
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  type      String
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model NotificationDelivery {
+  id                String              @id @default(uuid()) @db.Uuid
+  userId            String?             @db.Uuid
+  channel           NotificationChannel
+  provider          String
+  recipient         String
+  template          String
+  status            DeliveryStatus      @default(queued)
+  providerMessageId String?             @unique
+  errorMessage      String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @db.Uuid
+  action     String
+  entityType String
+  entityId   String?
+  requestId  String?
+  ip         String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
