@@ -33,6 +33,25 @@ Useful URLs:
 | `GET /api/v1/openapi.json` | OpenAPI 3 document generated from the live routes (import into Postman or Insomnia) |
 | `GET /api/v1/health/live`, `/health/ready` | Liveness probe, and readiness (checks the database and storage) |
 
+## Deploying to Render
+
+The repo includes a Render Blueprint (`render.yaml`). It creates a PostgreSQL database and the API web service in Frankfurt on the free plan, and generates every secret.
+
+1. In the Render dashboard, choose **New → Blueprint** and select this repository. The Blueprint deploys the `claude/funny-curie-p1cz1v` branch; change `branch:` in `render.yaml` after merging to `main`.
+2. Click **Apply**. The first build takes a few minutes. Every start runs the migrations and the idempotent seed.
+3. Find the admin login under **agriksense-api → Environment**: the email is `SEED_ADMIN_EMAIL` and the password is the generated `SEED_ADMIN_PASSWORD`.
+4. Give testers the base URL `https://<service>.onrender.com/api/v1`. They can import `https://<service>.onrender.com/api/v1/openapi.json` into Postman.
+
+The deployment runs with `NODE_ENV=staging`, which has these effects:
+- NIN/CAC checks use the mock provider.
+- AI predictions use mock inference.
+- Messages, including password-reset codes, appear under **agriksense-api → Logs**.
+
+**Free-plan limits:**
+- The service sleeps after 15 minutes idle, so the first request after that takes about a minute.
+- Uploaded files are stored on the instance and are lost on each redeploy. Add a Render Disk (paid) mounted at `STORAGE_DIR`, or object storage, for persistence.
+- The free database expires after 30 days. Upgrade it to keep the data.
+
 ## Tests
 
 ```bash

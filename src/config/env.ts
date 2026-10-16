@@ -3,11 +3,13 @@ import crypto from 'crypto';
 
 const nodeEnv = process.env.NODE_ENV ?? 'development';
 const isProduction = nodeEnv === 'production';
+/** Any deployed environment (staging, production…) must supply real secrets. */
+const isDeployed = !['development', 'test'].includes(nodeEnv);
 
 function required(name: string, devFallback: string): string {
   const value = process.env[name];
   if (value) return value;
-  if (isProduction) throw new Error(`Missing required environment variable ${name}`);
+  if (isDeployed) throw new Error(`Missing required environment variable ${name}`);
   return devFallback;
 }
 
@@ -25,7 +27,8 @@ export const env = {
   isProduction,
   isTest: nodeEnv === 'test',
   port: int('PORT', 4000),
-  publicBaseUrl: process.env.PUBLIC_BASE_URL ?? `http://localhost:${int('PORT', 4000)}`,
+  // RENDER_EXTERNAL_URL is set automatically on Render.
+  publicBaseUrl: process.env.PUBLIC_BASE_URL ?? process.env.RENDER_EXTERNAL_URL ?? `http://localhost:${int('PORT', 4000)}`,
   corsOrigins: (process.env.CORS_ORIGINS ?? '').split(',').map((o) => o.trim()).filter(Boolean),
 
   jwtAccessSecret: required('JWT_ACCESS_SECRET', devKey('access')),
@@ -63,6 +66,9 @@ export const env = {
   notificationWebhookSecret: process.env.NOTIFICATION_WEBHOOK_SECRET ?? '',
 };
 
+// Accept a 64-hex-char key as-is; derive a 32-byte key from any other high-entropy secret
+// (e.g. a platform-generated value).
 if (!/^[0-9a-f]{64}$/i.test(env.dataEncryptionKey)) {
-  throw new Error('DATA_ENCRYPTION_KEY must be 32 bytes encoded as 64 hex characters');
+  if (env.dataEncryptionKey.length < 32) throw new Error('DATA_ENCRYPTION_KEY must be 64 hex characters or a secret of at least 32 characters');
+  env.dataEncryptionKey = crypto.createHash('sha256').update(env.dataEncryptionKey).digest('hex');
 }
